@@ -5,7 +5,7 @@
 ## Quick Start
 
 ```bash
-# 安装所有 skills（克隆仓库 + 创建符号链接）
+# 安装所有 skills（克隆仓库 + 创建符号链接 + 清理已移除部署）
 ./install.sh
 
 # 预览模式，不做实际修改
@@ -14,8 +14,11 @@
 # 列出所有已管理的 skills 及其状态
 ./install.sh --list
 
-# 清理失效的符号链接
+# 显式启用清理（默认已启用）
 ./install.sh --cleanup
+
+# 跳过清理，仅克隆/更新并创建符号链接
+./install.sh --no-cleanup
 ```
 
 **前置依赖：** `python3` + `PyYAML`（脚本会自动安装）
@@ -27,7 +30,7 @@
 3. 重复运行时自动检查远程仓库更新——比较本地与远程 commit hash，有更新才拉取，并显示变更的 commit 摘要（如 `Updated repo (abc1234 -> def5678)`）；已是最新则显示 `Up-to-date`
 4. 符号链接指向 `.repos/` 中的目录，仓库更新后 symlink 自动指向最新内容，无需重建链接
 5. 本地 skills 优先级高于同名的仓库 skills
-6. `--cleanup` 只删除"指向本项目 `.repos/` 或项目根目录"的失效 symlink，不会误伤 Codex 自带的 `.system/` 目录或你手动放的其他内容
+6. 普通 `./install.sh` 默认会清理"指向本项目 `.repos/` 或项目根目录"但已不再托管的 symlink，并删除 `.repos/` 下已不在 `skills.yaml` 的 Git clone 缓存；不会误伤 Codex 自带的 `.system/` 目录或你手动放的其他 skill 目录。需要跳过清理时使用 `--no-cleanup`
 
 ### 多目标目录（Claude Code + Codex）
 
@@ -92,9 +95,8 @@ skills_dir: ~/.claude/skills
 | baoyu-skills | https://github.com/JimLiu/baoyu-skills | 21 |
 | agent-skills（`agent-` 前缀） | https://github.com/addyosmani/agent-skills | 21 |
 | remotion-skills | https://github.com/remotion-dev/skills | 1 |
-| logo-generator-skill | https://github.com/op7418/logo-generator-skill | 1 |
 | anything-to-notebooklm | https://github.com/joeseesun/anything-to-notebooklm | 1 |
-| **本仓库（local）** | — | 3 |
+| **本仓库（local）** | — | 1 |
 
 ---
 
@@ -102,8 +104,6 @@ skills_dir: ~/.claude/skills
 
 | Skill | 说明 |
 |-------|------|
-| [guige-blog-post](./guige-blog-post/) | 鬼哥博客文章全流程工作流：调研 → 撰写 → 配图 → 转 WebP → 提交推送 → 发微信公众号，触发命令 `/blog-post` |
-| [guige-x-to-blog](./guige-x-to-blog/) | 一键将 X 推文转为中文博客文章并发布到 luoli523.github.io |
 | [huiwang-writing-style](./huiwang-writing-style/) | 《回望灯火阑珊》写作风格指南，温情现实主义青春文学创作，适用于成长小说、考研/奋斗题材 |
 
 ---
@@ -233,16 +233,6 @@ skills_dir: ~/.claude/skills
 |-------|------|
 | [agent-documentation-and-adrs](https://github.com/addyosmani/agent-skills/tree/main/skills/documentation-and-adrs) | 架构决策记录（ADR）与文档沉淀 |
 | [agent-using-agent-skills](https://github.com/addyosmani/agent-skills/tree/main/skills/using-agent-skills) | 元 skill：发现并调用其他 agent skills |
-
----
-
-## logo-generator-skill
-
-来源：[op7418/logo-generator-skill](https://github.com/op7418/logo-generator-skill)
-
-| Skill | 说明 |
-|-------|------|
-| [logo-generator-skill](https://github.com/op7418/logo-generator-skill) | 生成专业 SVG Logo 和高端展示图，支持几何、点阵、线条等风格，含 12 种展示背景 |
 
 ---
 

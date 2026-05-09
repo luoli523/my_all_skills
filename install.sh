@@ -9,7 +9,7 @@ CONFIG_FILE="$SCRIPT_DIR/skills.yaml"
 
 # --- Defaults ---
 DRY_RUN=false
-CLEANUP=false
+CLEANUP=true
 LIST=false
 
 # --- Colors ---
@@ -28,7 +28,9 @@ Skills Manager - clone repos and symlink skills to ~/.claude/skills/
 
 Options:
   --dry-run   Show what would be done without making changes
-  --cleanup   Remove stale managed symlinks
+  --cleanup   Remove stale managed symlinks and orphan repo clones (default)
+  --no-cleanup
+              Skip stale managed symlink and orphan repo cleanup
   --list      List all managed skills and their status
   -h, --help  Show this help message
 
@@ -42,6 +44,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry-run)  DRY_RUN=true; shift ;;
         --cleanup)  CLEANUP=true; shift ;;
+        --no-cleanup) CLEANUP=false; shift ;;
         --list)     LIST=true; shift ;;
         -h|--help)  usage ;;
         *)          echo "Unknown option: $1"; usage ;;
@@ -244,6 +247,19 @@ def has_valid_frontmatter(skill_dir):
         content = f.read()
     return content.startswith('---\n') and '\n---\n' in content[4:]
 
+def resolve_link_target(link, target):
+    if os.path.isabs(target):
+        return os.path.abspath(target)
+    return os.path.abspath(os.path.join(os.path.dirname(link), target))
+
+def is_under(path, root):
+    path = os.path.abspath(path)
+    root = os.path.abspath(root)
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:
+        return False
+
 # --- Phase 2: Discover skills ---
 print(f"{BLUE}=== Phase 2: Discover skills ==={NC}")
 
@@ -367,9 +383,9 @@ for skills_dir in skills_dirs:
 
     print(f"    Created: {created}, Updated: {updated}, Unchanged: {skipped}")
 
-# --- Phase 5: Cleanup stale symlinks (for each target dir) ---
+# --- Phase 5: Cleanup stale managed state ---
 if cleanup:
-    print(f"{BLUE}=== Phase 5: Cleanup stale symlinks ==={NC}")
+    print(f"{BLUE}=== Phase 5: Cleanup stale managed state ==={NC}")
 
     for skills_dir in skills_dirs:
         print(f"  {BLUE}Target:{NC} {skills_dir}")
@@ -381,8 +397,9 @@ if cleanup:
                 if not os.path.islink(link):
                     continue
                 target = os.readlink(link)
+                target_path = resolve_link_target(link, target)
                 # Only remove symlinks pointing into our project
-                if target.startswith(clone_dir) or target.startswith(script_dir):
+                if is_under(target_path, clone_dir) or is_under(target_path, script_dir):
                     if entry not in skill_sources:
                         print(f"    {RED}Remove stale:{NC} {entry} -> {target}")
                         if not dry_run:
@@ -393,6 +410,29 @@ if cleanup:
             print("    No stale symlinks found")
         else:
             print(f"    Removed: {removed}")
+
+    configured_repos = set(cfg.get('repos', {}).keys())
+    removed_repos = 0
+    if os.path.isdir(clone_dir):
+        print(f"  {BLUE}Clone cache:{NC} {clone_dir}")
+        for entry in sorted(os.listdir(clone_dir)):
+            repo_dir = os.path.join(clone_dir, entry)
+            if entry in configured_repos:
+                continue
+            if not os.path.isdir(repo_dir):
+                continue
+            if not os.path.isdir(os.path.join(repo_dir, '.git')):
+                continue
+            print(f"    {RED}Remove orphan repo:{NC} {entry} -> {repo_dir}")
+            if not dry_run:
+                import shutil
+                shutil.rmtree(repo_dir)
+            removed_repos += 1
+
+        if removed_repos == 0:
+            print("    No orphan repo clones found")
+        else:
+            print(f"    Removed repos: {removed_repos}")
 
 if dry_run:
     print(f"\n{YELLOW}(dry-run mode - no changes were made){NC}")
