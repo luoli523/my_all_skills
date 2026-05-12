@@ -8,13 +8,16 @@ skills_dir:
   - ~/.codex/skills
 
 repos:
-  # Set enabled: false to keep clone/update managed but skip symlink deployment.
-  # Re-enable later by changing it back to true or removing the key.
+  # enabled: true deploys every skill in the repo.
+  # enabled: false keeps clone/update managed and skips symlink deployment by default.
+  # Add enabled_skills under a disabled repo to deploy only specific skills.
   awesome-claude-skills:
     enabled: false
     url: https://github.com/ComposioHQ/awesome-claude-skills.git
     branch: master
     skills_path: "."           # each top-level dir with SKILL.md is a skill
+    # enabled_skills:
+    #   - webapp-testing
 
   remotion-skills:
     enabled: true

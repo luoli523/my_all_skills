@@ -116,6 +116,14 @@ def repo_enabled(rcfg):
         return value.strip().lower() not in ('false', 'no', 'off', '0')
     return bool(value)
 
+def enabled_skill_names(rcfg):
+    value = rcfg.get('enabled_skills', [])
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        return {value}
+    return {str(item) for item in value}
+
 raw = cfg.get('skills_dir', '~/.claude/skills')
 if isinstance(raw, str):
     raw = [raw]
@@ -169,13 +177,19 @@ if local_skills:
 # Repo skills
 for repo_name, rcfg in cfg.get('repos', {}).items():
     enabled = repo_enabled(rcfg)
-    label = f"Repo: {repo_name}" if enabled else f"Repo: {repo_name} (disabled)"
+    enabled_skills = enabled_skill_names(rcfg)
+    if enabled:
+        label = f"Repo: {repo_name}"
+    elif enabled_skills:
+        label = f"Repo: {repo_name} (disabled, {len(enabled_skills)} enabled skill(s))"
+    else:
+        label = f"Repo: {repo_name} (disabled)"
     print(f"{GREEN}{label}{NC}")
     single_skill = rcfg.get('single_skill', False)
     prefix = rcfg.get('prefix', '')
     repo_dir = os.path.join(clone_dir, repo_name)
 
-    if not enabled:
+    if not enabled and not enabled_skills:
         print("  (disabled - clone/update remains managed; symlink creation is skipped)")
         if os.path.isdir(repo_dir):
             print(f"  clone cache kept: {repo_dir}")
@@ -183,7 +197,10 @@ for repo_name, rcfg in cfg.get('repos', {}).items():
         print("  (not cloned yet - run install first)")
     elif single_skill:
         skill_name = prefix + repo_name
-        print(f"  {skill_name} [{status(skill_name, repo_dir)}] -> {repo_dir}")
+        if enabled or repo_name in enabled_skills or skill_name in enabled_skills:
+            print(f"  {skill_name} [{status(skill_name, repo_dir)}] -> {repo_dir}")
+        else:
+            print("  (no enabled skills found)")
     else:
         skills_path = rcfg.get('skills_path', '.')
         scan_dir = os.path.join(repo_dir, skills_path) if skills_path != '.' else repo_dir
@@ -192,8 +209,10 @@ for repo_name, rcfg in cfg.get('repos', {}).items():
             for entry in sorted(os.listdir(scan_dir)):
                 skill_dir = os.path.join(scan_dir, entry)
                 if os.path.isdir(skill_dir) and os.path.isfile(os.path.join(skill_dir, 'SKILL.md')):
-                    found = True
                     skill_name = prefix + entry
+                    if not enabled and entry not in enabled_skills and skill_name not in enabled_skills:
+                        continue
+                    found = True
                     print(f"  {skill_name} [{status(skill_name, skill_dir)}] -> {skill_dir}")
         if not found:
             print("  (no skills found)")
@@ -258,6 +277,14 @@ def repo_enabled(rcfg):
         return value.strip().lower() not in ('false', 'no', 'off', '0')
     return bool(value)
 
+def enabled_skill_names(rcfg):
+    value = rcfg.get('enabled_skills', [])
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        return {value}
+    return {str(item) for item in value}
+
 # skills_dir can be a string or a list of strings
 raw = cfg.get('skills_dir', '~/.claude/skills')
 if isinstance(raw, str):
@@ -298,9 +325,13 @@ skill_repos = {}     # skill_name -> repo_name
 conflicts = {}       # skill_name -> description
 
 for repo_name, rcfg in cfg.get('repos', {}).items():
-    if not repo_enabled(rcfg):
+    enabled = repo_enabled(rcfg)
+    enabled_skills = enabled_skill_names(rcfg)
+    if not enabled and not enabled_skills:
         print(f"  {YELLOW}Disabled repo:{NC} {repo_name} (skipped)")
         continue
+    if not enabled:
+        print(f"  {YELLOW}Disabled repo:{NC} {repo_name} (installing enabled_skills only)")
 
     single_skill = rcfg.get('single_skill', False)
     prefix = rcfg.get('prefix', '')
@@ -315,6 +346,8 @@ for repo_name, rcfg in cfg.get('repos', {}).items():
         # Repo itself is the skill
         if os.path.isfile(os.path.join(repo_dir, 'SKILL.md')):
             skill_name = prefix + repo_name
+            if not enabled and repo_name not in enabled_skills and skill_name not in enabled_skills:
+                continue
             if skill_name in skill_sources:
                 conflicts[skill_name] = f"{skill_repos[skill_name]} + {repo_name}"
             else:
@@ -323,7 +356,6 @@ for repo_name, rcfg in cfg.get('repos', {}).items():
         continue
 
     skills_path = rcfg.get('skills_path', '.')
-    include = rcfg.get('include', [])
     scan_dir = repo_dir
     if skills_path != '.':
         scan_dir = os.path.join(scan_dir, skills_path)
@@ -337,10 +369,10 @@ for repo_name, rcfg in cfg.get('repos', {}).items():
             continue
         if not os.path.isfile(os.path.join(skill_dir, 'SKILL.md')):
             continue
-        if include and entry not in include:
-            continue
 
         skill_name = prefix + entry
+        if not enabled and entry not in enabled_skills and skill_name not in enabled_skills:
+            continue
         if skill_name in skill_sources:
             conflicts[skill_name] = f"{skill_repos[skill_name]} + {repo_name}"
         else:

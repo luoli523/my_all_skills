@@ -21,6 +21,26 @@ EOF
     git -C "$repo_dir" -c user.name="Test User" -c user.email="test@example.com" commit --quiet -m "add $skill_name"
 }
 
+make_multi_skill_repo() {
+    local repo_dir="$1"
+    shift
+
+    for skill_name in "$@"; do
+        mkdir -p "$repo_dir/skills/$skill_name"
+        cat >"$repo_dir/skills/$skill_name/SKILL.md" <<EOF
+---
+name: $skill_name
+description: Test skill
+---
+
+# $skill_name
+EOF
+    done
+    git -C "$repo_dir" init --initial-branch=main --quiet
+    git -C "$repo_dir" add .
+    git -C "$repo_dir" -c user.name="Test User" -c user.email="test@example.com" commit --quiet -m "add test skills"
+}
+
 write_config() {
     local project_dir="$1"
     local skills_dir="$2"
@@ -133,7 +153,77 @@ test_disabled_repo_updates_clone_but_removes_stale_link() {
     assert_not_exists "$skills_dir/disabled-skill"
 }
 
+test_disabled_repo_installs_enabled_skills_only() {
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' RETURN
+
+    local project_dir="$tmp/project"
+    local skills_dir="$tmp/skills"
+    mkdir -p "$project_dir" "$skills_dir" "$tmp/remotes/disabled"
+
+    make_multi_skill_repo "$tmp/remotes/disabled" "alpha" "beta" "gamma"
+
+    cat >"$project_dir/skills.yaml" <<EOF
+clone_dir: .repos
+skills_dir: $skills_dir
+repos:
+  disabled-repo:
+    enabled: false
+    url: $tmp/remotes/disabled
+    branch: main
+    skills_path: skills
+    enabled_skills:
+      - alpha
+      - gamma
+local: []
+EOF
+
+    run_install_in_project "$project_dir"
+
+    assert_exists "$project_dir/.repos/disabled-repo/.git"
+    assert_exists "$skills_dir/alpha"
+    assert_not_exists "$skills_dir/beta"
+    assert_exists "$skills_dir/gamma"
+}
+
+test_enabled_repo_installs_all_skills_even_with_filters() {
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' RETURN
+
+    local project_dir="$tmp/project"
+    local skills_dir="$tmp/skills"
+    mkdir -p "$project_dir" "$skills_dir" "$tmp/remotes/enabled"
+
+    make_multi_skill_repo "$tmp/remotes/enabled" "alpha" "beta" "gamma"
+
+    cat >"$project_dir/skills.yaml" <<EOF
+clone_dir: .repos
+skills_dir: $skills_dir
+repos:
+  enabled-repo:
+    enabled: true
+    url: $tmp/remotes/enabled
+    branch: main
+    skills_path: skills
+    include:
+      - alpha
+    enabled_skills:
+      - alpha
+local: []
+EOF
+
+    run_install_in_project "$project_dir"
+
+    assert_exists "$skills_dir/alpha"
+    assert_exists "$skills_dir/beta"
+    assert_exists "$skills_dir/gamma"
+}
+
 test_disabled_repo_is_cloned_but_not_linked
 test_disabled_repo_updates_clone_but_removes_stale_link
+test_disabled_repo_installs_enabled_skills_only
+test_enabled_repo_installs_all_skills_even_with_filters
 
-echo "disabled repo installer tests passed"
+echo "installer tests passed"

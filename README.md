@@ -34,7 +34,7 @@
 
 ## 启用/禁用仓库
 
-每个 `repos:` 条目都支持 `enabled`。默认等同于 `enabled: true`，所以已有配置不需要改。
+每个 `repos:` 条目都支持 `enabled` 和 `enabled_skills`。`enabled` 默认等同于 `true`，所以已有配置不需要改。
 
 ```yaml
 repos:
@@ -49,9 +49,20 @@ repos:
     url: https://github.com/JimLiu/baoyu-skills.git
     branch: main
     skills_path: skills
+    enabled_skills:
+      - baoyu-compress-image
+      - baoyu-translate
 ```
 
-`enabled: false` 会让 `install.sh` 继续 clone/update 该仓库，但跳过 skill discovery 和 symlink 创建。默认 cleanup 仍会移除这个仓库此前安装过的 managed symlink，但 `.repos/<repo>` clone cache 会保留并持续更新，因为它仍在 `skills.yaml` 中受管理。需要重新部署到 Claude Code/Codex 时，把它改回 `enabled: true` 或删除 `enabled` 这一行即可。
+部署规则：
+
+- `enabled: true`：部署该 repo 内全部 skills；即使写了 `enabled_skills` 或旧的 `include` 字段也不会过滤
+- `enabled: false` 且没有 `enabled_skills`：继续 clone/update 该 repo，但不部署任何 symlink
+- `enabled: false` 且设置了 `enabled_skills`：继续 clone/update 该 repo，只为 `enabled_skills` 列出的 skills 创建 symlink
+
+`enabled_skills` 可以填写 repo 内的原始 skill 目录名，也可以填写加上 `prefix` 后最终创建的 symlink 名。
+
+默认 cleanup 会移除不再应该部署的 managed symlink，但 `.repos/<repo>` clone cache 会保留并持续更新，因为它仍在 `skills.yaml` 中受管理。
 
 ### 多目标目录（Claude Code + Codex）
 
@@ -77,7 +88,14 @@ repos:
     url: https://github.com/user/repo.git
     branch: main
     skills_path: "."         # 扫描路径，"." 表示根目录
-    include:                 # 可选：只安装指定 skills
+
+  # 仓库默认禁用，但允许少数 skills 部署 symlink
+  mostly-disabled-skills:
+    enabled: false
+    url: https://github.com/user/many-skills.git
+    branch: main
+    skills_path: "skills"
+    enabled_skills:
       - skill-a
       - skill-b
 
