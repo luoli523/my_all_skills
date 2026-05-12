@@ -79,6 +79,12 @@ import yaml
 with open('$CONFIG_FILE') as f:
     cfg = yaml.safe_load(f)
 
+def repo_enabled(rcfg):
+    value = rcfg.get('enabled', True)
+    if isinstance(value, str):
+        return value.strip().lower() not in ('false', 'no', 'off', '0')
+    return bool(value)
+
 clone_dir = cfg.get('clone_dir', '.repos')
 print(f'CLONE_DIR=\"{clone_dir}\"')
 
@@ -87,7 +93,8 @@ repo_lines = []
 for name, rcfg in repos.items():
     url = rcfg.get('url', '')
     branch = rcfg.get('branch', 'main')
-    repo_lines.append(f'{name}|{url}|{branch}')
+    enabled = 'true' if repo_enabled(rcfg) else 'false'
+    repo_lines.append(f'{name}|{url}|{branch}|{enabled}')
 print(f'REPO_ENTRIES=\"{chr(10).join(repo_lines)}\"')
 ")"
 
@@ -102,6 +109,12 @@ config_file, script_dir, clone_dir = sys.argv[1:4]
 
 with open(config_file) as f:
     cfg = yaml.safe_load(f)
+
+def repo_enabled(rcfg):
+    value = rcfg.get('enabled', True)
+    if isinstance(value, str):
+        return value.strip().lower() not in ('false', 'no', 'off', '0')
+    return bool(value)
 
 raw = cfg.get('skills_dir', '~/.claude/skills')
 if isinstance(raw, str):
@@ -155,12 +168,18 @@ if local_skills:
 
 # Repo skills
 for repo_name, rcfg in cfg.get('repos', {}).items():
-    print(f"{GREEN}Repo: {repo_name}{NC}")
+    enabled = repo_enabled(rcfg)
+    label = f"Repo: {repo_name}" if enabled else f"Repo: {repo_name} (disabled)"
+    print(f"{GREEN}{label}{NC}")
     single_skill = rcfg.get('single_skill', False)
     prefix = rcfg.get('prefix', '')
     repo_dir = os.path.join(clone_dir, repo_name)
 
-    if not os.path.isdir(repo_dir):
+    if not enabled:
+        print("  (disabled - clone/update remains managed; symlink creation is skipped)")
+        if os.path.isdir(repo_dir):
+            print(f"  clone cache kept: {repo_dir}")
+    elif not os.path.isdir(repo_dir):
         print("  (not cloned yet - run install first)")
     elif single_skill:
         skill_name = prefix + repo_name
@@ -192,7 +211,12 @@ for entry in $REPO_ENTRIES; do
     repo_name="$(echo "$entry" | cut -d'|' -f1)"
     url="$(echo "$entry" | cut -d'|' -f2)"
     branch="$(echo "$entry" | cut -d'|' -f3)"
+    enabled="$(echo "$entry" | cut -d'|' -f4)"
     repo_dir="$CLONE_DIR_ABS/$repo_name"
+    deployment_note=""
+    if [[ "$enabled" != "true" ]]; then
+        deployment_note=" (symlinks disabled)"
+    fi
 
     if [[ -d "$repo_dir/.git" ]]; then
         if ! $DRY_RUN; then
@@ -200,16 +224,16 @@ for entry in $REPO_ENTRIES; do
             git -C "$repo_dir" fetch origin "$branch" --quiet
             remote_sha="$(git -C "$repo_dir" rev-parse "origin/$branch")"
             if [[ "$local_sha" != "$remote_sha" ]]; then
-                echo -e "  ${GREEN}Updated${NC} $repo_name (${local_sha:0:7} -> ${remote_sha:0:7})"
+                echo -e "  ${GREEN}Updated${NC} $repo_name (${local_sha:0:7} -> ${remote_sha:0:7})$deployment_note"
                 git -C "$repo_dir" reset --hard "origin/$branch" --quiet
             else
-                echo -e "  ${BLUE}Up-to-date${NC} $repo_name (${local_sha:0:7})"
+                echo -e "  ${BLUE}Up-to-date${NC} $repo_name (${local_sha:0:7})$deployment_note"
             fi
         else
-            echo -e "  ${GREEN}Would update${NC} $repo_name"
+            echo -e "  ${GREEN}Would update${NC} $repo_name$deployment_note"
         fi
     else
-        echo -e "  ${GREEN}Cloning${NC} $repo_name..."
+        echo -e "  ${GREEN}Cloning${NC} $repo_name...$deployment_note"
         if ! $DRY_RUN; then
             git clone --branch "$branch" --single-branch --quiet "$url" "$repo_dir"
         fi
@@ -227,6 +251,12 @@ cleanup = cleanup_str == "true"
 
 with open(config_file) as f:
     cfg = yaml.safe_load(f)
+
+def repo_enabled(rcfg):
+    value = rcfg.get('enabled', True)
+    if isinstance(value, str):
+        return value.strip().lower() not in ('false', 'no', 'off', '0')
+    return bool(value)
 
 # skills_dir can be a string or a list of strings
 raw = cfg.get('skills_dir', '~/.claude/skills')
@@ -268,6 +298,10 @@ skill_repos = {}     # skill_name -> repo_name
 conflicts = {}       # skill_name -> description
 
 for repo_name, rcfg in cfg.get('repos', {}).items():
+    if not repo_enabled(rcfg):
+        print(f"  {YELLOW}Disabled repo:{NC} {repo_name} (skipped)")
+        continue
+
     single_skill = rcfg.get('single_skill', False)
     prefix = rcfg.get('prefix', '')
     repo_dir = os.path.join(clone_dir, repo_name)

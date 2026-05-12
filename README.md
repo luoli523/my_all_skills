@@ -26,11 +26,32 @@
 ## 工作原理
 
 1. `skills.yaml` 定义 skill 来源（GitHub 仓库、本地 skills）和目标目录列表 `skills_dir`
-2. `install.sh` 克隆仓库到 `.repos/`，扫描含 `SKILL.md` 的目录，在 `skills_dir` 列表的**每一个**目录里都创建符号链接（默认 Claude Code + Codex 两处）
+2. `install.sh` 会克隆/更新 `repos:` 中所有仓库到 `.repos/`，但只为启用的仓库（默认启用，或显式 `enabled: true`）扫描和创建符号链接
 3. 重复运行时自动检查远程仓库更新——比较本地与远程 commit hash，有更新才拉取，并显示变更的 commit 摘要（如 `Updated repo (abc1234 -> def5678)`）；已是最新则显示 `Up-to-date`
 4. 符号链接指向 `.repos/` 中的目录，仓库更新后 symlink 自动指向最新内容，无需重建链接
 5. 本地 skills 优先级高于同名的仓库 skills
 6. 普通 `./install.sh` 默认会清理"指向本项目 `.repos/` 或项目根目录"但已不再托管的 symlink，并删除 `.repos/` 下已不在 `skills.yaml` 的 Git clone 缓存；不会误伤 Codex 自带的 `.system/` 目录或你手动放的其他 skill 目录。需要跳过清理时使用 `--no-cleanup`
+
+## 启用/禁用仓库
+
+每个 `repos:` 条目都支持 `enabled`。默认等同于 `enabled: true`，所以已有配置不需要改。
+
+```yaml
+repos:
+  agent-skills:
+    enabled: true
+    url: https://github.com/addyosmani/agent-skills.git
+    branch: main
+    skills_path: skills
+
+  baoyu-skills:
+    enabled: false
+    url: https://github.com/JimLiu/baoyu-skills.git
+    branch: main
+    skills_path: skills
+```
+
+`enabled: false` 会让 `install.sh` 继续 clone/update 该仓库，但跳过 skill discovery 和 symlink 创建。默认 cleanup 仍会移除这个仓库此前安装过的 managed symlink，但 `.repos/<repo>` clone cache 会保留并持续更新，因为它仍在 `skills.yaml` 中受管理。需要重新部署到 Claude Code/Codex 时，把它改回 `enabled: true` 或删除 `enabled` 这一行即可。
 
 ### 多目标目录（Claude Code + Codex）
 
@@ -52,6 +73,7 @@ Codex 和 Claude Code 的 skill 目录格式兼容（同样是含 `SKILL.md` 的
 repos:
   # 仓库内含多个 skill 子目录
   my-skills-collection:
+    enabled: true           # 可选；默认 true。设为 false 仍更新仓库但不部署 symlink
     url: https://github.com/user/repo.git
     branch: main
     skills_path: "."         # 扫描路径，"." 表示根目录
