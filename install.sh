@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Skills Manager for my_claude_skills
+# Skills Manager for my_all_skills
 # Clones repos defined in skills.yaml and creates symlinks to ~/.claude/skills/
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -72,7 +72,7 @@ ensure_pyyaml() {
 
 ensure_pyyaml
 
-# --- Parse config for bash (repos list + clone_dir only) ---
+# --- Parse config for bash (repos split by install_mode) ---
 eval "$(python3 -c "
 import yaml
 
@@ -85,20 +85,32 @@ def repo_enabled(rcfg):
         return value.strip().lower() not in ('false', 'no', 'off', '0')
     return bool(value)
 
+def install_mode(rcfg):
+    return str(rcfg.get('install_mode', 'symlink')).strip().lower()
+
 clone_dir = cfg.get('clone_dir', '.repos')
+plugin_state = cfg.get('plugin_state_file', '.plugin_state.json')
 print(f'CLONE_DIR=\"{clone_dir}\"')
+print(f'PLUGIN_STATE_FILE=\"{plugin_state}\"')
 
 repos = cfg.get('repos', {})
-repo_lines = []
+symlink_lines = []
+plugin_count = 0
 for name, rcfg in repos.items():
+    mode = install_mode(rcfg)
+    if mode == 'plugin':
+        plugin_count += 1
+        continue
     url = rcfg.get('url', '')
     branch = rcfg.get('branch', 'main')
     enabled = 'true' if repo_enabled(rcfg) else 'false'
-    repo_lines.append(f'{name}|{url}|{branch}|{enabled}')
-print(f'REPO_ENTRIES=\"{chr(10).join(repo_lines)}\"')
+    symlink_lines.append(f'{name}|{url}|{branch}|{enabled}')
+print(f'SYMLINK_REPO_ENTRIES=\"{chr(10).join(symlink_lines)}\"')
+print(f'PLUGIN_REPO_COUNT={plugin_count}')
 ")"
 
 CLONE_DIR_ABS="$SCRIPT_DIR/$CLONE_DIR"
+PLUGIN_STATE_ABS="$SCRIPT_DIR/$PLUGIN_STATE_FILE"
 
 # --- Phase: --list ---
 if $LIST; then
@@ -174,16 +186,37 @@ if local_skills:
             print(f"  {skill} (missing)")
     print()
 
+# Live state for plugin-mode display.
+import json, subprocess
+installed_plugin_ids = set()
+try:
+    out = subprocess.check_output(
+        ['claude', 'plugin', 'list', '--json'], stderr=subprocess.DEVNULL
+    )
+    installed_plugin_ids = {p.get('id') for p in json.loads(out) if p.get('id')}
+except Exception:
+    pass
+
 # Repo skills
 for repo_name, rcfg in cfg.get('repos', {}).items():
+    mode = str(rcfg.get('install_mode', 'symlink')).strip().lower()
+    if mode == 'plugin':
+        mkt = rcfg.get('marketplace', '?')
+        plg = rcfg.get('plugin', '?')
+        key = f"{plg}@{mkt}"
+        state = 'installed' if key in installed_plugin_ids else 'pending'
+        print(f"{GREEN}Repo: {repo_name} [plugin: {state}]{NC}")
+        print(f"  {key}  url={rcfg.get('url', '?')}")
+        print()
+        continue
     enabled = repo_enabled(rcfg)
     enabled_skills = enabled_skill_names(rcfg)
     if enabled:
-        label = f"Repo: {repo_name}"
+        label = f"Repo: {repo_name} [symlink]"
     elif enabled_skills:
-        label = f"Repo: {repo_name} (disabled, {len(enabled_skills)} enabled skill(s))"
+        label = f"Repo: {repo_name} [symlink] (disabled, {len(enabled_skills)} enabled skill(s))"
     else:
-        label = f"Repo: {repo_name} (disabled)"
+        label = f"Repo: {repo_name} [symlink] (disabled)"
     print(f"{GREEN}{label}{NC}")
     single_skill = rcfg.get('single_skill', False)
     prefix = rcfg.get('prefix', '')
@@ -221,12 +254,16 @@ PYEOF
     exit 0
 fi
 
-# --- Phase 1: Clone or update repos ---
-echo -e "${BLUE}=== Phase 1: Clone/update repos ===${NC}"
+# --- Phase 1: Clone or update symlink-mode repos ---
+echo -e "${BLUE}=== Phase 1: Clone/update repos (symlink mode) ===${NC}"
 mkdir -p "$CLONE_DIR_ABS"
 
+if [[ -z "${SYMLINK_REPO_ENTRIES:-}" ]]; then
+    echo "  (no symlink-mode repos configured)"
+fi
+
 IFS=$'\n'
-for entry in $REPO_ENTRIES; do
+for entry in $SYMLINK_REPO_ENTRIES; do
     repo_name="$(echo "$entry" | cut -d'|' -f1)"
     url="$(echo "$entry" | cut -d'|' -f2)"
     branch="$(echo "$entry" | cut -d'|' -f3)"
@@ -259,6 +296,154 @@ for entry in $REPO_ENTRIES; do
     fi
 done
 unset IFS
+
+# --- Phase 1b: Plugin sync via `claude plugin` CLI ---
+if [[ "$PLUGIN_REPO_COUNT" -gt 0 || -f "$PLUGIN_STATE_ABS" ]]; then
+    echo -e "${BLUE}=== Phase 1b: Plugin sync ===${NC}"
+    python3 -u - "$CONFIG_FILE" "$PLUGIN_STATE_ABS" "$DRY_RUN" <<'PYEOF'
+import json, os, shutil, subprocess, sys
+import yaml
+
+config_file, state_file, dry_run_str = sys.argv[1:4]
+dry_run = dry_run_str == 'true'
+
+RED, GREEN, YELLOW, BLUE, NC = (
+    '\033[0;31m', '\033[0;32m', '\033[1;33m', '\033[0;34m', '\033[0m'
+)
+
+with open(config_file) as f:
+    cfg = yaml.safe_load(f)
+
+# Build desired state from yaml.
+desired_marketplaces = {}   # mkt_name -> {'url': str, 'plugins': set()}
+desired_plugins = {}        # 'plg@mkt' -> {'marketplace': str, 'plugin': str}
+
+for repo_name, rcfg in (cfg.get('repos') or {}).items():
+    mode = str(rcfg.get('install_mode', 'symlink')).strip().lower()
+    if mode != 'plugin':
+        continue
+    mkt = rcfg.get('marketplace')
+    plg = rcfg.get('plugin')
+    url = rcfg.get('url')
+    if not (mkt and plg and url):
+        print(f"  {RED}Error:{NC} plugin repo '{repo_name}' missing url/marketplace/plugin field")
+        sys.exit(1)
+    desired_marketplaces.setdefault(mkt, {'url': url, 'plugins': set()})
+    desired_marketplaces[mkt]['plugins'].add(plg)
+    desired_plugins[f"{plg}@{mkt}"] = {'marketplace': mkt, 'plugin': plg}
+
+# Load previous managed state.
+if os.path.isfile(state_file):
+    with open(state_file) as f:
+        prev_state = json.load(f)
+else:
+    prev_state = {'marketplaces': {}, 'plugins': {}}
+prev_marketplaces = set((prev_state.get('marketplaces') or {}).keys())
+prev_plugins = set((prev_state.get('plugins') or {}).keys())
+
+# Need claude CLI for any action.
+need_cli = bool(desired_marketplaces or prev_marketplaces or prev_plugins)
+if need_cli and shutil.which('claude') is None:
+    print(f"  {RED}Error:{NC} `claude` CLI not found in PATH. Install Claude Code first.")
+    sys.exit(1)
+
+# Live marketplace state from on-disk json (no --json flag on `marketplace list`).
+known_mkt_path = os.path.expanduser('~/.claude/plugins/known_marketplaces.json')
+if os.path.isfile(known_mkt_path):
+    with open(known_mkt_path) as f:
+        known_mkt = json.load(f)
+else:
+    known_mkt = {}
+
+# Live installed-plugin set.
+installed_plugins = set()
+if need_cli:
+    try:
+        out = subprocess.check_output(
+            ['claude', 'plugin', 'list', '--json'], stderr=subprocess.DEVNULL
+        )
+        installed_plugins = {p.get('id') for p in json.loads(out) if p.get('id')}
+    except (subprocess.CalledProcessError, FileNotFoundError, json.JSONDecodeError):
+        pass
+
+ok = True
+
+def run(cmd, label):
+    global ok
+    print(f"  {GREEN}{label}:{NC} {' '.join(cmd)}")
+    if dry_run:
+        return True
+    rc = subprocess.call(cmd)
+    if rc != 0:
+        print(f"  {RED}Command failed (rc={rc}):{NC} {' '.join(cmd)}")
+        ok = False
+        return False
+    return True
+
+# Sync marketplaces: add new, update existing.
+for mkt_name, info in desired_marketplaces.items():
+    if mkt_name in known_mkt:
+        run(['claude', 'plugin', 'marketplace', 'update', mkt_name],
+            label='Update marketplace')
+    else:
+        run(['claude', 'plugin', 'marketplace', 'add', info['url']],
+            label='Add marketplace')
+
+# Sync plugins: install missing.
+for key in desired_plugins:
+    if key in installed_plugins:
+        print(f"  {BLUE}Already installed:{NC} {key}")
+    else:
+        run(['claude', 'plugin', 'install', key], label='Install plugin')
+
+# Cleanup plugins we previously managed but no longer want.
+for key in sorted(prev_plugins - set(desired_plugins.keys())):
+    if key in installed_plugins:
+        run(['claude', 'plugin', 'uninstall', key], label='Uninstall plugin')
+    else:
+        print(f"  {YELLOW}Already gone:{NC} {key}")
+
+# Cleanup marketplaces no longer referenced.
+for mkt in sorted(prev_marketplaces - set(desired_marketplaces.keys())):
+    if mkt in known_mkt:
+        run(['claude', 'plugin', 'marketplace', 'remove', mkt],
+            label='Remove marketplace')
+    else:
+        print(f"  {YELLOW}Already gone marketplace:{NC} {mkt}")
+
+# Re-query reality so state reflects what actually exists, not what we asked for.
+if not dry_run:
+    try:
+        out = subprocess.check_output(
+            ['claude', 'plugin', 'list', '--json'], stderr=subprocess.DEVNULL
+        )
+        installed_now = {p.get('id') for p in json.loads(out) if p.get('id')}
+    except Exception:
+        installed_now = installed_plugins  # fall back to pre-op snapshot
+    if os.path.isfile(known_mkt_path):
+        with open(known_mkt_path) as f:
+            known_mkt_now = json.load(f)
+    else:
+        known_mkt_now = {}
+
+    new_state = {
+        'marketplaces': {
+            m: {'url': info['url']}
+            for m, info in desired_marketplaces.items()
+            if m in known_mkt_now
+        },
+        'plugins': {
+            k: v for k, v in desired_plugins.items() if k in installed_now
+        },
+    }
+    with open(state_file, 'w') as f:
+        json.dump(new_state, f, indent=2, sort_keys=True)
+
+if not ok:
+    print(f"  {YELLOW}Plugin sync had errors. Continuing with symlink phases.{NC}",
+          file=sys.stderr)
+PYEOF
+fi
 
 # --- Phases 2-5: Discover, resolve conflicts, symlink, cleanup (all in Python) ---
 python3 - "$CONFIG_FILE" "$SCRIPT_DIR" "$CLONE_DIR_ABS" "$DRY_RUN" "$CLEANUP" <<'PYEOF'
@@ -325,6 +510,8 @@ skill_repos = {}     # skill_name -> repo_name
 conflicts = {}       # skill_name -> description
 
 for repo_name, rcfg in cfg.get('repos', {}).items():
+    if str(rcfg.get('install_mode', 'symlink')).strip().lower() == 'plugin':
+        continue
     enabled = repo_enabled(rcfg)
     enabled_skills = enabled_skill_names(rcfg)
     if not enabled and not enabled_skills:
@@ -477,7 +664,11 @@ if cleanup:
         else:
             print(f"    Removed: {removed}")
 
-    configured_repos = set(cfg.get('repos', {}).keys())
+    # Only symlink-mode repos own a clone under clone_dir.
+    configured_repos = {
+        name for name, rcfg in (cfg.get('repos') or {}).items()
+        if str(rcfg.get('install_mode', 'symlink')).strip().lower() != 'plugin'
+    }
     removed_repos = 0
     if os.path.isdir(clone_dir):
         print(f"  {BLUE}Clone cache:{NC} {clone_dir}")
