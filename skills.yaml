@@ -5,21 +5,23 @@
 clone_dir: .repos
 plugin_state_file: .plugin_state.json   # 记录 install.sh 管理过的 marketplace/plugin
 
-# Skills symlinks 会同时创建到下列所有目录（Claude Code + Codex 等）
-# 注意: install_mode: plugin 的 repo 不会写入这些目录, 由 Claude Code plugin 系统接管。
+# skills_dir 按 target 选择子集 (见 --target claude|codex|both):
+#   target=claude → 只用 ~/.claude/skills
+#   target=codex  → 只用 ~/.codex/skills
+#   target=both   → 串行处理两端
 skills_dir:
-  - ~/.claude/skills
-  - ~/.codex/skills
+  claude: ~/.claude/skills
+  codex: ~/.codex/skills
 
 repos:
   # install_mode:
-  #   - symlink (default): clone 到 .repos/ 并 symlink 到 skills_dir。
-  #   - plugin: 调用 `claude plugin` CLI 注册 marketplace + 安装 plugin。
-  #             Codex 端不部署。需声明 marketplace 和 plugin 的 name 字段
-  #             (从 repo 的 .claude-plugin/marketplace.json 读取)。
+  #   - symlink (default): clone 到 .repos/ 并 symlink 到当前 target 对应的 skills_dir。
+  #   - plugin: claude target 时调用 `claude plugin` CLI 注册 marketplace + 安装 plugin;
+  #             codex target 时降级为 symlink (用 branch/skills_path/prefix fallback 字段)。
   #
   # symlink 模式可选: enabled / enabled_skills / skills_path / prefix / single_skill。
   # plugin 模式必填: url + marketplace + plugin。
+  # plugin 模式可选 (用于 codex target 降级 symlink): branch / skills_path / prefix / single_skill。
 
   awesome-claude-skills:
     install_mode: symlink
@@ -42,6 +44,9 @@ repos:
     url: https://github.com/JimLiu/baoyu-skills.git
     marketplace: baoyu-skills
     plugin: baoyu-skills
+    # codex target symlink fallback:
+    branch: main
+    skills_path: "skills"
     description: >
       暴雨(baoyu)系列 Skills 合集，包含图片生成、漫画创作、封面设计、
       信息图、幻灯片、文章配图、图片压缩、网页转 Markdown、
@@ -52,6 +57,10 @@ repos:
     url: https://github.com/addyosmani/agent-skills.git
     marketplace: addy-agent-skills
     plugin: agent-skills
+    # codex target symlink fallback:
+    branch: main
+    skills_path: "skills"
+    prefix: "agent-"
     description: >
       Addy Osmani 的 Agent Skills 合集，覆盖开发全生命周期：
       规划、实现、测试、代码审查、性能优化、安全加固、发布等 20 个 skills
