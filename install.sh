@@ -433,7 +433,7 @@ for mkt_name, info in desired_marketplaces.items():
 
 for key in desired_plugins:
     if key in installed_plugins:
-        print(f"  {BLUE}Already installed:{NC} {key}")
+        run(['claude', 'plugin', 'update', key], label='Update plugin')
     else:
         run(['claude', 'plugin', 'install', key], label='Install plugin')
 
