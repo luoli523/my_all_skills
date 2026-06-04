@@ -80,8 +80,44 @@ assert_not_exists() {
 
 run_install_in_project() {
     local project_dir="$1"
+    shift || true
     cp "$ROOT_DIR/install.sh" "$project_dir/install.sh"
-    bash "$project_dir/install.sh" >"$project_dir/install.log"
+    bash "$project_dir/install.sh" "$@" >"$project_dir/install.log"
+}
+
+make_fake_codex() {
+    local bin_dir="$1"
+
+    mkdir -p "$bin_dir"
+    cat >"$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' "$*" >>"${FAKE_CODEX_LOG:?}"
+
+if [[ "${1:-}" == "plugin" && "${2:-}" == "marketplace" && "${3:-}" == "list" ]]; then
+    printf 'MARKETPLACE             ROOT\n'
+    exit 0
+fi
+
+if [[ "${1:-}" == "plugin" && "${2:-}" == "list" ]]; then
+    printf '{"installed":[],"available":[]}\n'
+    exit 0
+fi
+
+exit 0
+EOF
+    chmod +x "$bin_dir/codex"
+}
+
+assert_file_contains() {
+    local file="$1"
+    local pattern="$2"
+
+    if ! grep -Fq "$pattern" "$file"; then
+        echo "Expected $file to contain: $pattern" >&2
+        exit 1
+    fi
 }
 
 commit_skill_change() {
@@ -221,9 +257,107 @@ EOF
     assert_exists "$skills_dir/gamma"
 }
 
+test_codex_adapter_generates_marketplace_plugin() {
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' RETURN
+
+    local project_dir="$tmp/project"
+    local skills_dir="$tmp/skills"
+    local fake_bin="$tmp/bin"
+    local codex_log="$tmp/codex.log"
+    mkdir -p "$project_dir" "$skills_dir" "$tmp/remotes/adapter"
+
+    make_multi_skill_repo "$tmp/remotes/adapter" "alpha" "beta"
+    make_fake_codex "$fake_bin"
+
+    cat >"$project_dir/skills.yaml" <<EOF
+clone_dir: .repos
+codex_adapter_dir: .codex-adapters
+plugin_state_file: .plugin_state.json
+skills_dir:
+  claude: $tmp/claude-skills
+  codex: $skills_dir
+repos:
+  adapter-repo:
+    install_mode: plugin
+    url: $tmp/remotes/adapter
+    branch: main
+    marketplace: claude-marketplace
+    plugin: claude-plugin
+    codex:
+      mode: adapter
+      marketplace: adapter-repo
+      plugin: adapter-plugin
+      skills_path: skills
+      prefix: pref-
+local: []
+EOF
+
+    cp "$ROOT_DIR/install.sh" "$project_dir/install.sh"
+    FAKE_CODEX_LOG="$codex_log" PATH="$fake_bin:$PATH" \
+        bash "$project_dir/install.sh" --target codex --no-cleanup >"$project_dir/install.log"
+
+    assert_exists "$project_dir/.repos/adapter-repo/.git"
+    assert_exists "$project_dir/.codex-adapters/adapter-repo/.agents/plugins/marketplace.json"
+    assert_exists "$project_dir/.codex-adapters/adapter-repo/plugins/adapter-plugin/.codex-plugin/plugin.json"
+    assert_exists "$project_dir/.codex-adapters/adapter-repo/plugins/adapter-plugin/skills/pref-alpha/SKILL.md"
+    assert_file_contains "$project_dir/.codex-adapters/adapter-repo/plugins/adapter-plugin/.codex-plugin/plugin.json" '"name": "adapter-plugin"'
+    assert_file_contains "$project_dir/.codex-adapters/adapter-repo/.agents/plugins/marketplace.json" '"name": "adapter-repo"'
+    assert_file_contains "$project_dir/.codex-adapters/adapter-repo/plugins/adapter-plugin/skills/pref-alpha/SKILL.md" "name: pref-alpha"
+    assert_file_contains "$codex_log" "plugin marketplace add $project_dir/.codex-adapters/adapter-repo"
+    assert_file_contains "$codex_log" "plugin add adapter-plugin@adapter-repo"
+    assert_not_exists "$skills_dir/pref-alpha"
+}
+
+test_codex_marketplace_installs_without_clone() {
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' RETURN
+
+    local project_dir="$tmp/project"
+    local skills_dir="$tmp/skills"
+    local fake_bin="$tmp/bin"
+    local codex_log="$tmp/codex.log"
+    mkdir -p "$project_dir" "$skills_dir" "$tmp/remotes/guige"
+
+    make_fake_codex "$fake_bin"
+
+    cat >"$project_dir/skills.yaml" <<EOF
+clone_dir: .repos
+codex_adapter_dir: .codex-adapters
+plugin_state_file: .plugin_state.json
+skills_dir:
+  claude: $tmp/claude-skills
+  codex: $skills_dir
+repos:
+  guige-skills:
+    install_mode: plugin
+    url: $tmp/remotes/guige
+    branch: main
+    marketplace: guige-skills
+    plugin: guige
+    codex:
+      mode: marketplace
+      marketplace: guige-skills
+      plugin: guige
+local: []
+EOF
+
+    cp "$ROOT_DIR/install.sh" "$project_dir/install.sh"
+    FAKE_CODEX_LOG="$codex_log" PATH="$fake_bin:$PATH" \
+        bash "$project_dir/install.sh" --target codex --no-cleanup >"$project_dir/install.log"
+
+    assert_not_exists "$project_dir/.repos/guige-skills"
+    assert_file_contains "$codex_log" "plugin marketplace add $tmp/remotes/guige --ref main"
+    assert_file_contains "$codex_log" "plugin add guige@guige-skills"
+}
+
 test_disabled_repo_is_cloned_but_not_linked
 test_disabled_repo_updates_clone_but_removes_stale_link
 test_disabled_repo_installs_enabled_skills_only
 test_enabled_repo_installs_all_skills_even_with_filters
+test_codex_adapter_generates_marketplace_plugin
+test_codex_marketplace_installs_without_clone
 
 echo "installer tests passed"

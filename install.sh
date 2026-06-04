@@ -5,8 +5,8 @@ set -euo pipefail
 # Clones repos defined in skills.yaml, then either:
 #   - symlinks skills into ~/.claude/skills (claude target, symlink-mode repos)
 #   - installs plugins via `claude plugin` CLI (claude target, plugin-mode repos)
-#   - symlinks every repo into ~/.codex/skills (codex target, plugin-mode repos
-#     fall back to symlink via branch/skills_path/prefix fields)
+#   - installs plugins via `codex plugin` CLI (codex target, plugin-mode repos)
+#   - symlinks skills into ~/.codex/skills (codex target, symlink-mode repos)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="$SCRIPT_DIR/skills.yaml"
@@ -28,14 +28,14 @@ usage() {
     cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
 
-Skills Manager - deploy skills to Claude Code (plugin or symlink) and Codex (symlink).
+Skills Manager - deploy skills to Claude Code and Codex (plugin or symlink).
 
 Options:
   --target <t> Target: claude | codex | both (default: both)
                  claude: symlink symlink-mode repos to ~/.claude/skills +
                          install plugin-mode repos via \`claude plugin\` CLI.
-                 codex:  symlink ALL repos to ~/.codex/skills (plugin-mode
-                         repos use branch/skills_path/prefix fallback).
+                 codex:  symlink symlink-mode repos to ~/.codex/skills +
+                         install plugin-mode repos via \`codex plugin\` CLI.
                  both:   run claude target then codex target.
   --dry-run    Show what would be done without making changes.
   --cleanup    Remove stale managed symlinks and orphan repo clones (default).
@@ -100,6 +100,7 @@ def install_mode(rcfg):
     return str(rcfg.get('install_mode', 'symlink')).strip().lower()
 
 print(f'CLONE_DIR=\"{cfg.get(\"clone_dir\", \".repos\")}\"')
+print(f'CODEX_ADAPTER_DIR=\"{cfg.get(\"codex_adapter_dir\", \".codex-adapters\")}\"')
 print(f'PLUGIN_STATE_FILE=\"{cfg.get(\"plugin_state_file\", \".plugin_state.json\")}\"')
 
 sd = cfg.get('skills_dir') or {}
@@ -109,6 +110,9 @@ if isinstance(sd, dict):
 elif isinstance(sd, list):
     claude_dir = sd[0] if len(sd) > 0 else '~/.claude/skills'
     codex_dir  = sd[1] if len(sd) > 1 else '~/.codex/skills'
+elif isinstance(sd, str):
+    claude_dir = sd
+    codex_dir = sd
 else:
     claude_dir, codex_dir = '~/.claude/skills', '~/.codex/skills'
 print(f'CLAUDE_SKILLS_DIR=\"{os.path.expanduser(claude_dir)}\"')
@@ -121,24 +125,27 @@ for name, rcfg in repos.items():
     mode = install_mode(rcfg)
     if mode == 'plugin':
         plugin_count += 1
+    codex_cfg = rcfg.get('codex') or {}
+    codex_mode = str(codex_cfg.get('mode', 'adapter' if mode == 'plugin' else 'symlink')).strip().lower()
     url = rcfg.get('url', '')
     branch = rcfg.get('branch', 'main')
     enabled = 'true' if repo_enabled(rcfg) else 'false'
-    lines.append(f'{name}|{url}|{branch}|{enabled}|{mode}')
+    lines.append(f'{name}|{url}|{branch}|{enabled}|{mode}|{codex_mode}')
 print(f'ALL_REPO_ENTRIES=\"{chr(10).join(lines)}\"')
 print(f'PLUGIN_REPO_COUNT={plugin_count}')
 ")"
 
 CLONE_DIR_ABS="$SCRIPT_DIR/$CLONE_DIR"
+CODEX_ADAPTER_DIR_ABS="$SCRIPT_DIR/$CODEX_ADAPTER_DIR"
 PLUGIN_STATE_ABS="$SCRIPT_DIR/$PLUGIN_STATE_FILE"
 
 # --- Phase: --list (shows both targets in one shot) ---
 if $LIST; then
     python3 - "$CONFIG_FILE" "$SCRIPT_DIR" "$CLONE_DIR_ABS" \
-              "$CLAUDE_SKILLS_DIR" "$CODEX_SKILLS_DIR" <<'PYEOF'
+              "$CLAUDE_SKILLS_DIR" "$CODEX_SKILLS_DIR" "$CODEX_ADAPTER_DIR_ABS" <<'PYEOF'
 import yaml, os, sys
 
-config_file, script_dir, clone_dir, claude_dir, codex_dir = sys.argv[1:6]
+config_file, script_dir, clone_dir, claude_dir, codex_dir, codex_adapter_dir = sys.argv[1:7]
 
 with open(config_file) as f:
     cfg = yaml.safe_load(f)
@@ -205,12 +212,23 @@ if local_skills:
 
 # Live plugin install state
 import json, subprocess
-installed_plugin_ids = set()
+installed_claude_plugin_ids = set()
+installed_codex_plugin_ids = set()
 try:
     out = subprocess.check_output(
         ['claude', 'plugin', 'list', '--json'], stderr=subprocess.DEVNULL
     )
-    installed_plugin_ids = {p.get('id') for p in json.loads(out) if p.get('id')}
+    installed_claude_plugin_ids = {p.get('id') for p in json.loads(out) if p.get('id')}
+except Exception:
+    pass
+try:
+    out = subprocess.check_output(
+        ['codex', 'plugin', 'list', '--json'], stderr=subprocess.DEVNULL
+    )
+    data = json.loads(out)
+    installed_codex_plugin_ids = {
+        p.get('pluginId') for p in data.get('installed', []) if p.get('pluginId')
+    }
 except Exception:
     pass
 
@@ -220,16 +238,35 @@ for repo_name, rcfg in cfg.get('repos', {}).items():
     enabled = repo_enabled(rcfg)
     enabled_skills = enabled_skill_names(rcfg)
     repo_dir = os.path.join(clone_dir, repo_name)
-    single_skill = rcfg.get('single_skill', False)
-    prefix = rcfg.get('prefix', '')
+    codex_cfg = rcfg.get('codex') or {}
+    codex_mode = str(codex_cfg.get('mode', 'adapter' if mode == 'plugin' else 'symlink')).strip().lower()
+    single_skill = codex_cfg.get('single_skill', rcfg.get('single_skill', False))
+    prefix = codex_cfg.get('prefix', rcfg.get('prefix', ''))
 
     if mode == 'plugin':
         mkt = rcfg.get('marketplace', '?')
         plg = rcfg.get('plugin', '?')
-        key = f"{plg}@{mkt}"
-        plugin_state = 'installed' if key in installed_plugin_ids else 'pending'
-        print(f"{GREEN}Repo: {repo_name} [plugin: {plugin_state}, +codex symlink fallback]{NC}")
-        print(f"  claude side: {key}  url={rcfg.get('url', '?')}")
+        claude_key = f"{plg}@{mkt}"
+        claude_state = 'installed' if claude_key in installed_claude_plugin_ids else 'pending'
+        codex_mkt = codex_cfg.get('marketplace', repo_name)
+        codex_plg = codex_cfg.get('plugin', plg)
+        codex_key = f"{codex_plg}@{codex_mkt}"
+        codex_state = 'installed' if codex_key in installed_codex_plugin_ids else 'pending'
+        print(f"{GREEN}Repo: {repo_name} [plugin]{NC}")
+        print(f"  claude side: {claude_key} [{claude_state}]  url={rcfg.get('url', '?')}")
+        if codex_mode in ('adapter', 'marketplace'):
+            print(f"  codex side:  {codex_key} [{codex_state}, {codex_mode}]")
+            if codex_mode == 'adapter':
+                print(f"  adapter root: {os.path.join(codex_adapter_dir, str(codex_mkt))}")
+            print()
+            continue
+        if codex_mode == 'none':
+            print("  codex side:  skipped")
+            print()
+            continue
+        if codex_mode == 'symlink':
+            print("  codex side:  symlink fallback")
+            enabled = True
     elif enabled:
         print(f"{GREEN}Repo: {repo_name} [symlink]{NC}")
     elif enabled_skills:
@@ -251,7 +288,7 @@ for repo_name, rcfg in cfg.get('repos', {}).items():
         else:
             print("  (no enabled skills found)")
     else:
-        skills_path = rcfg.get('skills_path', '.')
+        skills_path = codex_cfg.get('skills_path', rcfg.get('skills_path', '.'))
         scan_dir = os.path.join(repo_dir, skills_path) if skills_path != '.' else repo_dir
         found = False
         if os.path.isdir(scan_dir):
@@ -275,19 +312,19 @@ fi
 run_target() {
     local target_name="$1"
     local skills_dir_abs
-    local include_plugin_as_symlink
-    local run_plugin_sync
+    local run_claude_plugin_sync
+    local run_codex_plugin_sync
 
     case "$target_name" in
         claude)
             skills_dir_abs="$CLAUDE_SKILLS_DIR"
-            include_plugin_as_symlink=false
-            run_plugin_sync=true
+            run_claude_plugin_sync=true
+            run_codex_plugin_sync=false
             ;;
         codex)
             skills_dir_abs="$CODEX_SKILLS_DIR"
-            include_plugin_as_symlink=true
-            run_plugin_sync=false
+            run_claude_plugin_sync=false
+            run_codex_plugin_sync=true
             ;;
     esac
 
@@ -304,15 +341,21 @@ run_target() {
 
     IFS=$'\n'
     for entry in $ALL_REPO_ENTRIES; do
-        local repo_name url branch enabled mode repo_dir deployment_note
+        local repo_name url branch enabled mode codex_mode repo_dir deployment_note
         repo_name="$(echo "$entry" | cut -d'|' -f1)"
         url="$(echo "$entry" | cut -d'|' -f2)"
         branch="$(echo "$entry" | cut -d'|' -f3)"
         enabled="$(echo "$entry" | cut -d'|' -f4)"
         mode="$(echo "$entry" | cut -d'|' -f5)"
+        codex_mode="$(echo "$entry" | cut -d'|' -f6)"
 
         # Claude target: plugin-mode repos are handled by Phase 1b, not Phase 1.
         if [[ "$target_name" == "claude" && "$mode" == "plugin" ]]; then
+            continue
+        fi
+        # Codex target: native marketplace plugins don't need the .repos clone.
+        if [[ "$target_name" == "codex" && "$mode" == "plugin" && \
+              ( "$codex_mode" == "marketplace" || "$codex_mode" == "none" ) ]]; then
             continue
         fi
 
@@ -347,7 +390,7 @@ run_target() {
     unset IFS
 
     # --- Phase 1b: Plugin sync (claude target only) ---
-    if $run_plugin_sync; then
+    if $run_claude_plugin_sync; then
         if [[ "$PLUGIN_REPO_COUNT" -gt 0 || -f "$PLUGIN_STATE_ABS" ]]; then
             echo -e "${BLUE}=== Phase 1b: Plugin sync ===${NC}"
             python3 -u - "$CONFIG_FILE" "$PLUGIN_STATE_ABS" "$DRY_RUN" <<'PYEOF'
@@ -383,9 +426,21 @@ for repo_name, rcfg in (cfg.get('repos') or {}).items():
 
 if os.path.isfile(state_file):
     with open(state_file) as f:
-        prev_state = json.load(f)
+        full_state = json.load(f)
 else:
-    prev_state = {'marketplaces': {}, 'plugins': {}}
+    full_state = {}
+if 'claude' in full_state or 'codex' in full_state:
+    full_state.setdefault('claude', {'marketplaces': {}, 'plugins': {}})
+    full_state.setdefault('codex', {'marketplaces': {}, 'plugins': {}})
+else:
+    full_state = {
+        'claude': {
+            'marketplaces': full_state.get('marketplaces', {}),
+            'plugins': full_state.get('plugins', {}),
+        },
+        'codex': {'marketplaces': {}, 'plugins': {}},
+    }
+prev_state = full_state['claude']
 prev_marketplaces = set((prev_state.get('marketplaces') or {}).keys())
 prev_plugins = set((prev_state.get('plugins') or {}).keys())
 
@@ -463,7 +518,7 @@ if not dry_run:
     else:
         known_mkt_now = {}
 
-    new_state = {
+    full_state['claude'] = {
         'marketplaces': {
             m: {'url': info['url']}
             for m, info in desired_marketplaces.items()
@@ -474,7 +529,7 @@ if not dry_run:
         },
     }
     with open(state_file, 'w') as f:
-        json.dump(new_state, f, indent=2, sort_keys=True)
+        json.dump(full_state, f, indent=2, sort_keys=True)
 
 if not ok:
     print(f"  {YELLOW}Plugin sync had errors. Continuing with symlink phases.{NC}",
@@ -483,15 +538,400 @@ PYEOF
         fi
     fi
 
+    # --- Phase 1c: Codex plugin sync (codex target only) ---
+    if $run_codex_plugin_sync; then
+        if [[ "$PLUGIN_REPO_COUNT" -gt 0 || -f "$PLUGIN_STATE_ABS" ]]; then
+            echo -e "${BLUE}=== Phase 1c: Codex plugin sync ===${NC}"
+            python3 -u - "$CONFIG_FILE" "$PLUGIN_STATE_ABS" "$DRY_RUN" \
+                      "$SCRIPT_DIR" "$CLONE_DIR_ABS" "$CODEX_ADAPTER_DIR_ABS" <<'PYEOF'
+import json, os, shutil, subprocess, sys
+import yaml
+
+config_file, state_file, dry_run_str, script_dir, clone_dir, adapter_dir = sys.argv[1:7]
+dry_run = dry_run_str == 'true'
+
+RED, GREEN, YELLOW, BLUE, NC = (
+    '\033[0;31m', '\033[0;32m', '\033[1;33m', '\033[0;34m', '\033[0m'
+)
+
+with open(config_file) as f:
+    cfg = yaml.safe_load(f)
+
+def repo_enabled(rcfg):
+    value = rcfg.get('enabled', True)
+    if isinstance(value, str):
+        return value.strip().lower() not in ('false', 'no', 'off', '0')
+    return bool(value)
+
+def enabled_skill_names(rcfg):
+    value = rcfg.get('enabled_skills', [])
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        return {value}
+    return {str(item) for item in value}
+
+def compact_description(text, fallback):
+    text = str(text or '').strip()
+    if not text:
+        return fallback
+    return ' '.join(text.split())
+
+def run(cmd, label):
+    print(f"  {GREEN}{label}:{NC} {' '.join(cmd)}")
+    if dry_run:
+        return True
+    rc = subprocess.call(cmd)
+    if rc != 0:
+        print(f"  {RED}Command failed (rc={rc}):{NC} {' '.join(cmd)}")
+        return False
+    return True
+
+def read_json_command(cmd, default):
+    try:
+        out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True)
+    except Exception:
+        return default
+    text = out.strip()
+    if not text:
+        return default
+    start = min([idx for idx in (text.find('{'), text.find('[')) if idx >= 0], default=-1)
+    if start > 0:
+        text = text[start:]
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return default
+
+def codex_marketplaces():
+    try:
+        out = subprocess.check_output(
+            ['codex', 'plugin', 'marketplace', 'list'],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except Exception:
+        return {}
+    result = {}
+    for line in out.splitlines():
+        line = line.strip()
+        if not line or line.startswith('WARNING:') or line.startswith('MARKETPLACE'):
+            continue
+        parts = line.split(None, 1)
+        if len(parts) == 2:
+            result[parts[0]] = parts[1]
+    return result
+
+def installed_codex_plugins():
+    data = read_json_command(['codex', 'plugin', 'list', '--json'], {'installed': []})
+    return {
+        p.get('pluginId')
+        for p in data.get('installed', [])
+        if p.get('pluginId')
+    }
+
+def rewrite_skill_name(skill_dir, skill_name):
+    skill_md = os.path.join(skill_dir, 'SKILL.md')
+    try:
+        with open(skill_md, encoding='utf-8') as f:
+            content = f.read()
+    except OSError:
+        return
+    if not content.startswith('---\n'):
+        return
+    end = content.find('\n---\n', 4)
+    if end == -1:
+        return
+    frontmatter = content[4:end]
+    rest = content[end:]
+    lines = frontmatter.splitlines()
+    replaced = False
+    for idx, line in enumerate(lines):
+        if line.startswith('name:'):
+            lines[idx] = f'name: {skill_name}'
+            replaced = True
+            break
+    if not replaced:
+        lines.insert(0, f'name: {skill_name}')
+    with open(skill_md, 'w', encoding='utf-8') as f:
+        f.write('---\n' + '\n'.join(lines) + rest)
+
+def discover_adapter_skills(repo_name, rcfg, codex_cfg):
+    repo_dir = os.path.join(clone_dir, repo_name)
+    enabled = repo_enabled(rcfg)
+    enabled_skills = enabled_skill_names(rcfg)
+    prefix = str(codex_cfg.get('prefix', rcfg.get('prefix', '')))
+    single_skill = codex_cfg.get('single_skill', rcfg.get('single_skill', False))
+
+    if single_skill:
+        if not os.path.isfile(os.path.join(repo_dir, 'SKILL.md')):
+            return []
+        skill_name = prefix + repo_name
+        if not enabled and repo_name not in enabled_skills and skill_name not in enabled_skills:
+            return []
+        return [(skill_name, repo_dir)]
+
+    skills_path = str(codex_cfg.get('skills_path', rcfg.get('skills_path', '.')))
+    scan_dir = repo_dir if skills_path == '.' else os.path.join(repo_dir, skills_path)
+    if not os.path.isdir(scan_dir):
+        return []
+
+    skills = []
+    for entry in sorted(os.listdir(scan_dir)):
+        skill_dir = os.path.join(scan_dir, entry)
+        if not os.path.isdir(skill_dir):
+            continue
+        if not os.path.isfile(os.path.join(skill_dir, 'SKILL.md')):
+            continue
+        skill_name = prefix + entry
+        if not enabled and entry not in enabled_skills and skill_name not in enabled_skills:
+            continue
+        skills.append((skill_name, skill_dir))
+    return skills
+
+def build_adapter(repo_name, rcfg, codex_cfg, marketplace, plugin):
+    adapter_root = os.path.join(adapter_dir, marketplace)
+    plugins_dir = os.path.join(adapter_root, 'plugins')
+    plugin_root = os.path.join(plugins_dir, plugin)
+    skills_root = os.path.join(plugin_root, 'skills')
+    marketplace_dir = os.path.join(adapter_root, '.agents', 'plugins')
+    marketplace_json = os.path.join(marketplace_dir, 'marketplace.json')
+
+    skills = discover_adapter_skills(repo_name, rcfg, codex_cfg)
+    if not skills:
+        if dry_run:
+            print(f"  {YELLOW}Would generate adapter:{NC} {plugin}@{marketplace} after clone")
+            return adapter_root
+        print(f"  {RED}Error:{NC} no skills found for adapter repo '{repo_name}'")
+        return None
+
+    description = compact_description(
+        codex_cfg.get('description', rcfg.get('description')),
+        f'Codex adapter for {repo_name}',
+    )
+    display_name = str(codex_cfg.get('display_name', plugin))
+    category = str(codex_cfg.get('category', 'Productivity'))
+    version = str(codex_cfg.get('version', '0.1.0'))
+
+    print(f"  {GREEN}Generate adapter:{NC} {plugin}@{marketplace} ({len(skills)} skills)")
+    if dry_run:
+        return adapter_root
+
+    if os.path.isdir(plugins_dir):
+        shutil.rmtree(plugins_dir)
+    os.makedirs(skills_root, exist_ok=True)
+    os.makedirs(os.path.join(plugin_root, '.codex-plugin'), exist_ok=True)
+    os.makedirs(marketplace_dir, exist_ok=True)
+
+    for skill_name, source_dir in skills:
+        dest_dir = os.path.join(skills_root, skill_name)
+        shutil.copytree(source_dir, dest_dir, symlinks=True)
+        rewrite_skill_name(dest_dir, skill_name)
+
+    plugin_json = {
+        'name': plugin,
+        'version': version,
+        'description': description,
+        'skills': './skills/',
+        'interface': {
+            'displayName': display_name,
+            'shortDescription': description[:128],
+            'longDescription': description,
+            'developerName': str(codex_cfg.get('developer_name', 'my_all_skills')),
+            'category': category,
+            'capabilities': codex_cfg.get('capabilities', ['Write']),
+        },
+    }
+    with open(os.path.join(plugin_root, '.codex-plugin', 'plugin.json'), 'w', encoding='utf-8') as f:
+        json.dump(plugin_json, f, indent=2, ensure_ascii=False)
+        f.write('\n')
+
+    marketplace_data = {
+        'name': marketplace,
+        'interface': {
+            'displayName': str(codex_cfg.get('marketplace_display_name', marketplace)),
+        },
+        'plugins': [
+            {
+                'name': plugin,
+                'source': {
+                    'source': 'local',
+                    'path': f'./plugins/{plugin}',
+                },
+                'policy': {
+                    'installation': str(codex_cfg.get('install_policy', 'AVAILABLE')),
+                    'authentication': str(codex_cfg.get('auth_policy', 'ON_INSTALL')),
+                },
+                'category': category,
+            }
+        ],
+    }
+    with open(marketplace_json, 'w', encoding='utf-8') as f:
+        json.dump(marketplace_data, f, indent=2, ensure_ascii=False)
+        f.write('\n')
+
+    return adapter_root
+
+if os.path.isfile(state_file):
+    with open(state_file) as f:
+        full_state = json.load(f)
+else:
+    full_state = {}
+if 'claude' in full_state or 'codex' in full_state:
+    full_state.setdefault('claude', {'marketplaces': {}, 'plugins': {}})
+    full_state.setdefault('codex', {'marketplaces': {}, 'plugins': {}})
+else:
+    full_state = {
+        'claude': {
+            'marketplaces': full_state.get('marketplaces', {}),
+            'plugins': full_state.get('plugins', {}),
+        },
+        'codex': {'marketplaces': {}, 'plugins': {}},
+    }
+prev_state = full_state['codex']
+prev_marketplaces = set((prev_state.get('marketplaces') or {}).keys())
+prev_plugins = set((prev_state.get('plugins') or {}).keys())
+
+desired_marketplaces = {}
+desired_plugins = {}
+ok = True
+
+for repo_name, rcfg in (cfg.get('repos') or {}).items():
+    mode = str(rcfg.get('install_mode', 'symlink')).strip().lower()
+    if mode != 'plugin':
+        continue
+
+    codex_cfg = rcfg.get('codex') or {}
+    if not codex_cfg:
+        print(f"  {YELLOW}Warning:{NC} plugin repo '{repo_name}' missing codex config; using adapter mode")
+    codex_mode = str(codex_cfg.get('mode', 'adapter')).strip().lower()
+    if codex_mode == 'none' or codex_mode == 'symlink':
+        continue
+    if codex_mode not in ('adapter', 'marketplace'):
+        print(f"  {RED}Error:{NC} plugin repo '{repo_name}' has invalid codex.mode '{codex_mode}'")
+        ok = False
+        continue
+
+    marketplace = str(codex_cfg.get('marketplace', repo_name))
+    plugin = str(codex_cfg.get('plugin', rcfg.get('plugin', repo_name)))
+
+    if codex_mode == 'adapter':
+        source = build_adapter(repo_name, rcfg, codex_cfg, marketplace, plugin)
+        if not source:
+            ok = False
+            continue
+        source_type = 'local'
+    else:
+        source = str(codex_cfg.get('source', rcfg.get('url', '')))
+        if not source:
+            print(f"  {RED}Error:{NC} marketplace repo '{repo_name}' missing codex.source/url")
+            ok = False
+            continue
+        source_type = 'git'
+
+    desired_marketplaces[marketplace] = {
+        'source': source,
+        'mode': codex_mode,
+        'source_type': source_type,
+        'repo': repo_name,
+        'ref': codex_cfg.get('ref', rcfg.get('branch')),
+        'sparse': codex_cfg.get('sparse', []),
+    }
+    desired_plugins[f'{plugin}@{marketplace}'] = {
+        'marketplace': marketplace,
+        'plugin': plugin,
+        'mode': codex_mode,
+    }
+
+need_cli = bool(desired_marketplaces or prev_marketplaces or prev_plugins)
+if need_cli and shutil.which('codex') is None:
+    print(f"  {RED}Error:{NC} `codex` CLI not found in PATH. Install Codex first.")
+    sys.exit(1)
+
+known_marketplaces = codex_marketplaces() if need_cli else {}
+installed_plugins = installed_codex_plugins() if need_cli else set()
+
+for marketplace, info in desired_marketplaces.items():
+    source = info['source']
+    mode = info['mode']
+    if marketplace in known_marketplaces:
+        root = os.path.abspath(os.path.expanduser(known_marketplaces[marketplace]))
+        if mode == 'adapter' and root != os.path.abspath(source):
+            print(
+                f"  {YELLOW}Warning:{NC} marketplace '{marketplace}' already points to {root}, "
+                f"expected {os.path.abspath(source)}"
+            )
+        if mode == 'marketplace':
+            ok = run(['codex', 'plugin', 'marketplace', 'upgrade', marketplace],
+                     label='Upgrade Codex marketplace') and ok
+        else:
+            print(f"  {BLUE}Codex marketplace present:{NC} {marketplace}")
+        continue
+
+    cmd = ['codex', 'plugin', 'marketplace', 'add', source]
+    if mode == 'marketplace' and info.get('ref'):
+        cmd.extend(['--ref', str(info['ref'])])
+    sparse = info.get('sparse') or []
+    if isinstance(sparse, str):
+        sparse = [sparse]
+    for path in sparse:
+        cmd.extend(['--sparse', str(path)])
+    ok = run(cmd, label='Add Codex marketplace') and ok
+
+for key in desired_plugins:
+    if key in installed_plugins:
+        print(f"  {BLUE}Codex plugin installed:{NC} {key}")
+    else:
+        ok = run(['codex', 'plugin', 'add', key], label='Install Codex plugin') and ok
+
+for key in sorted(prev_plugins - set(desired_plugins.keys())):
+    if key in installed_plugins:
+        ok = run(['codex', 'plugin', 'remove', key], label='Remove Codex plugin') and ok
+    else:
+        print(f"  {YELLOW}Already gone Codex plugin:{NC} {key}")
+
+for marketplace in sorted(prev_marketplaces - set(desired_marketplaces.keys())):
+    if marketplace in known_marketplaces:
+        ok = run(['codex', 'plugin', 'marketplace', 'remove', marketplace],
+                 label='Remove Codex marketplace') and ok
+    else:
+        print(f"  {YELLOW}Already gone Codex marketplace:{NC} {marketplace}")
+
+if not dry_run:
+    known_now = codex_marketplaces()
+    installed_now = installed_codex_plugins()
+    full_state['codex'] = {
+        'marketplaces': {
+            m: {
+                'source': info['source'],
+                'mode': info['mode'],
+                'source_type': info['source_type'],
+            }
+            for m, info in desired_marketplaces.items()
+            if m in known_now
+        },
+        'plugins': {
+            k: v for k, v in desired_plugins.items() if k in installed_now
+        },
+    }
+    with open(state_file, 'w') as f:
+        json.dump(full_state, f, indent=2, sort_keys=True)
+
+if not ok:
+    print(f"  {YELLOW}Codex plugin sync had errors. Continuing with symlink phases.{NC}",
+          file=sys.stderr)
+PYEOF
+        fi
+    fi
+
     # --- Phases 2-4 + per-target symlink cleanup ---
     python3 - "$CONFIG_FILE" "$SCRIPT_DIR" "$CLONE_DIR_ABS" "$DRY_RUN" "$CLEANUP" \
-              "$skills_dir_abs" "$include_plugin_as_symlink" <<'PYEOF'
+              "$skills_dir_abs" "$target_name" <<'PYEOF'
 import yaml, os, sys
 
-config_file, script_dir, clone_dir, dry_run_str, cleanup_str, skills_dir, include_plugin_str = sys.argv[1:8]
+config_file, script_dir, clone_dir, dry_run_str, cleanup_str, skills_dir, target_name = sys.argv[1:8]
 dry_run = dry_run_str == "true"
 cleanup = cleanup_str == "true"
-include_plugin_as_symlink = include_plugin_str == "true"
 
 with open(config_file) as f:
     cfg = yaml.safe_load(f)
@@ -544,11 +984,16 @@ conflicts = {}
 
 for repo_name, rcfg in cfg.get('repos', {}).items():
     mode = str(rcfg.get('install_mode', 'symlink')).strip().lower()
-    if mode == 'plugin' and not include_plugin_as_symlink:
-        continue
+    codex_cfg = rcfg.get('codex') or {}
+    codex_mode = str(codex_cfg.get('mode', 'adapter' if mode == 'plugin' else 'symlink')).strip().lower()
+    if mode == 'plugin':
+        if target_name == 'claude':
+            continue
+        if codex_mode != 'symlink':
+            continue
     enabled = repo_enabled(rcfg)
     enabled_skills = enabled_skill_names(rcfg)
-    # Plugin-mode-as-symlink: treat as enabled unless explicitly disabled.
+    # Explicit Codex plugin symlink fallback keeps the old "install all" behavior.
     if mode == 'plugin':
         enabled = True
     if not enabled and not enabled_skills:
@@ -557,8 +1002,8 @@ for repo_name, rcfg in cfg.get('repos', {}).items():
     if not enabled:
         print(f"  {YELLOW}Disabled repo:{NC} {repo_name} (installing enabled_skills only)")
 
-    single_skill = rcfg.get('single_skill', False)
-    prefix = rcfg.get('prefix', '')
+    single_skill = codex_cfg.get('single_skill', rcfg.get('single_skill', False))
+    prefix = codex_cfg.get('prefix', rcfg.get('prefix', ''))
     repo_dir = os.path.join(clone_dir, repo_name)
 
     if not os.path.isdir(repo_dir):
@@ -578,7 +1023,7 @@ for repo_name, rcfg in cfg.get('repos', {}).items():
                 skill_repos[skill_name] = repo_name
         continue
 
-    skills_path = rcfg.get('skills_path', '.')
+    skills_path = codex_cfg.get('skills_path', rcfg.get('skills_path', '.'))
     scan_dir = repo_dir
     if skills_path != '.':
         scan_dir = os.path.join(scan_dir, skills_path)
@@ -719,13 +1164,23 @@ with open(config_file) as f:
 
 repos = cfg.get('repos') or {}
 
+def needs_clone_for_codex(rcfg):
+    mode = str(rcfg.get('install_mode', 'symlink')).strip().lower()
+    if mode != 'plugin':
+        return True
+    codex_cfg = rcfg.get('codex') or {}
+    codex_mode = str(codex_cfg.get('mode', 'adapter')).strip().lower()
+    return codex_mode in ('adapter', 'symlink')
+
 # Configured set depends on which targets ran:
-#   - codex or both: every repo (yaml-wide) is allowed to keep a clone
+#   - codex or both: keep symlink repos plus plugin repos that need adapter/symlink clone cache.
 #   - claude only:   plugin-mode repos should not have a .repos clone (they
-#                    aren't used in claude-only mode); only symlink-mode
-#                    repos are kept.
+#                    aren't used in claude-only mode); only symlink-mode repos are kept.
 if target in ('codex', 'both'):
-    configured = set(repos.keys())
+    configured = {
+        name for name, rcfg in repos.items()
+        if needs_clone_for_codex(rcfg)
+    }
 else:  # claude
     configured = {
         name for name, rcfg in repos.items()

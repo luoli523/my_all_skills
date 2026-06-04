@@ -3,6 +3,7 @@
 # 或通过 Claude Code 自带的 plugin 机制安装 (install_mode: plugin)。
 
 clone_dir: .repos
+codex_adapter_dir: .codex-adapters
 plugin_state_file: .plugin_state.json   # 记录 install.sh 管理过的 marketplace/plugin
 
 # skills_dir 按 target 选择子集 (见 --target claude|codex|both):
@@ -17,11 +18,15 @@ repos:
   # install_mode:
   #   - symlink (default): clone 到 .repos/ 并 symlink 到当前 target 对应的 skills_dir。
   #   - plugin: claude target 时调用 `claude plugin` CLI 注册 marketplace + 安装 plugin;
-  #             codex target 时降级为 symlink (用 branch/skills_path/prefix fallback 字段)。
+  #             codex target 时按 codex.mode 使用 Codex plugin/marketplace。
   #
   # symlink 模式可选: enabled / enabled_skills / skills_path / prefix / single_skill。
   # plugin 模式必填: url + marketplace + plugin。
-  # plugin 模式可选 (用于 codex target 降级 symlink): branch / skills_path / prefix / single_skill。
+  # plugin 的 codex.mode:
+  #   - marketplace: 上游 repo 已经是 Codex marketplace，直接 codex plugin marketplace/add。
+  #   - adapter:     上游还不是 Codex marketplace，本安装器生成本地 Codex adapter marketplace。
+  #   - symlink:     显式保留旧的 ~/.codex/skills symlink fallback。
+  #   - none:        Codex target 不安装。
 
   awesome-claude-skills:
     install_mode: symlink
@@ -44,9 +49,13 @@ repos:
     url: https://github.com/JimLiu/baoyu-skills.git
     marketplace: baoyu-skills
     plugin: baoyu-skills
-    # codex target symlink fallback:
     branch: main
     skills_path: "skills"
+    codex:
+      mode: adapter
+      marketplace: baoyu-skills
+      plugin: baoyu-skills
+      skills_path: "skills"
     description: >
       暴雨(baoyu)系列 Skills 合集，包含图片生成、漫画创作、封面设计、
       信息图、幻灯片、文章配图、图片压缩、网页转 Markdown、
@@ -57,10 +66,15 @@ repos:
     url: https://github.com/addyosmani/agent-skills.git
     marketplace: addy-agent-skills
     plugin: agent-skills
-    # codex target symlink fallback:
     branch: main
     skills_path: "skills"
     prefix: "agent-"
+    codex:
+      mode: adapter
+      marketplace: agent-skills
+      plugin: agent-skills
+      skills_path: "skills"
+      prefix: "agent-"
     description: >
       Addy Osmani 的 Agent Skills 合集，覆盖开发全生命周期：
       规划、实现、测试、代码审查、性能优化、安全加固、发布等 20 个 skills
@@ -70,9 +84,12 @@ repos:
     url: https://github.com/luoli523/guige-skills.git
     marketplace: guige-skills
     plugin: guige
-    # codex target symlink fallback:
     branch: main
     skills_path: "skills"
+    codex:
+      mode: marketplace
+      marketplace: guige-skills
+      plugin: guige
     description: >
       鬼哥个人 Claude Code skills 集合，覆盖图片生成、信息图、幻灯片、
       视频下载、内容发布等 13 个 skills

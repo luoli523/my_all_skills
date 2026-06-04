@@ -1,12 +1,16 @@
 # My Claude Skills
 
-个人收藏和管理的 AI 编程助手 Skills 集合。通过 `skills.yaml` 清单统一跟踪多个 GitHub 仓库和本地 Skills，使用 `install.sh` 一键克隆仓库并**同时**为 Claude Code（`~/.claude/skills/`）和 Codex（`~/.codex/skills/`）创建符号链接，一份源文件、两处可用。
+个人收藏和管理的 AI 编程助手 Skills 集合。通过 `skills.yaml` 清单统一跟踪多个 GitHub 仓库和本地 Skills，使用 `install.sh` 一键部署到 Claude Code 和 Codex：普通 skills 使用符号链接，plugin 仓库分别走 Claude Code plugin CLI 或 Codex plugin/marketplace CLI。
 
 ## Quick Start
 
 ```bash
-# 安装所有 skills（克隆仓库 + 创建符号链接 + 清理已移除部署）
+# 安装所有 skills/plugins（clone/update + plugin/symlink 部署 + 清理）
 ./install.sh
+
+# 只处理 Claude Code 或 Codex
+./install.sh --target claude
+./install.sh --target codex
 
 # 预览模式，不做实际修改
 ./install.sh --dry-run
@@ -25,12 +29,13 @@
 
 ## 工作原理
 
-1. `skills.yaml` 定义 skill 来源（GitHub 仓库、本地 skills）和目标目录列表 `skills_dir`
-2. `install.sh` 会克隆/更新 `repos:` 中所有仓库到 `.repos/`，但只为启用的仓库（默认启用，或显式 `enabled: true`）扫描和创建符号链接
+1. `skills.yaml` 定义 skill/plugin 来源（GitHub 仓库、本地 skills）和目标目录 `skills_dir`
+2. `install.sh` 会克隆/更新需要本地扫描的仓库到 `.repos/`，但只为启用的 symlink 仓库（默认启用，或显式 `enabled: true`）扫描和创建符号链接
 3. 重复运行时自动检查远程仓库更新——比较本地与远程 commit hash，有更新才拉取，并显示变更的 commit 摘要（如 `Updated repo (abc1234 -> def5678)`）；已是最新则显示 `Up-to-date`
 4. 符号链接指向 `.repos/` 中的目录，仓库更新后 symlink 自动指向最新内容，无需重建链接
 5. 本地 skills 优先级高于同名的仓库 skills
-6. 普通 `./install.sh` 默认会清理"指向本项目 `.repos/` 或项目根目录"但已不再托管的 symlink，并删除 `.repos/` 下已不在 `skills.yaml` 的 Git clone 缓存；不会误伤 Codex 自带的 `.system/` 目录或你手动放的其他 skill 目录。需要跳过清理时使用 `--no-cleanup`
+6. `install_mode: plugin` 的仓库在 Claude target 下使用 `claude plugin`；在 Codex target 下按 `codex.mode` 使用 Codex marketplace、adapter、symlink fallback 或跳过
+7. 普通 `./install.sh` 默认会清理"指向本项目 `.repos/` 或项目根目录"但已不再托管的 symlink，并删除 `.repos/` 下已不在 `skills.yaml` 的 Git clone 缓存；不会误伤 Codex 自带的 `.system/` 目录或你手动放的其他 skill 目录。需要跳过清理时使用 `--no-cleanup`
 
 ## 启用/禁用仓库
 
@@ -64,17 +69,54 @@ repos:
 
 默认 cleanup 会移除不再应该部署的 managed symlink，但 `.repos/<repo>` clone cache 会保留并持续更新，因为它仍在 `skills.yaml` 中受管理。
 
+## Plugin 安装模式
+
+`install_mode: plugin` 的 repo 支持 Claude 和 Codex 两套安装方式：
+
+```yaml
+repos:
+  baoyu-skills:
+    install_mode: plugin
+    url: https://github.com/JimLiu/baoyu-skills.git
+    marketplace: baoyu-skills      # Claude Code marketplace
+    plugin: baoyu-skills           # Claude Code plugin
+    branch: main
+    skills_path: skills
+    codex:
+      mode: adapter
+      marketplace: baoyu-skills    # Codex selector: baoyu-skills@baoyu-skills
+      plugin: baoyu-skills
+      skills_path: skills
+
+  guige-skills:
+    install_mode: plugin
+    url: https://github.com/luoli523/guige-skills.git
+    marketplace: guige-skills
+    plugin: guige
+    codex:
+      mode: marketplace
+      marketplace: guige-skills    # Codex selector: guige@guige-skills
+      plugin: guige
+```
+
+Codex 的 `codex.mode` 可选：
+
+- `marketplace`：上游 repo 已经是 Codex marketplace 格式，直接调用 `codex plugin marketplace add/upgrade` 和 `codex plugin add <plugin>@<marketplace>`
+- `adapter`：上游还不是 Codex marketplace，安装器在 `.codex-adapters/<marketplace>/` 生成本地 Codex marketplace 和 plugin wrapper，再安装 `<plugin>@<marketplace>`
+- `symlink`：显式保留旧行为，直接 symlink 到 `~/.codex/skills`
+- `none`：Codex target 不安装
+
 ### 多目标目录（Claude Code + Codex）
 
-`skills_dir` 支持单个字符串或数组，默认配置：
+`skills_dir` 支持按 target 配置，默认配置：
 
 ```yaml
 skills_dir:
-  - ~/.claude/skills     # Claude Code
-  - ~/.codex/skills      # Codex
+  claude: ~/.claude/skills
+  codex: ~/.codex/skills
 ```
 
-Codex 和 Claude Code 的 skill 目录格式兼容（同样是含 `SKILL.md` 的目录、同样的 frontmatter），因此一份源文件在两边都能被识别。Codex 自带的系统 skills（`~/.codex/skills/.system/`）不受影响。
+脚本仍兼容旧的数组格式；如果 `skills_dir` 是单个字符串，Claude 和 Codex target 会共用这个目录。Codex 和 Claude Code 的 skill 目录格式兼容（同样是含 `SKILL.md` 的目录、同样的 frontmatter），因此 symlink 模式下一份源文件在两边都能被识别。Codex 自带的系统 skills（`~/.codex/skills/.system/`）不受影响。
 
 ## 添加新仓库
 
