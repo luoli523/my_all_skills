@@ -851,7 +851,47 @@ if need_cli and shutil.which('codex') is None:
 known_marketplaces = codex_marketplaces() if need_cli else {}
 installed_plugins = installed_codex_plugins() if need_cli else set()
 
+previous_marketplace_info = prev_state.get('marketplaces') or {}
+previous_plugin_info = prev_state.get('plugins') or {}
+replacement_marketplaces = set()
 for marketplace, info in desired_marketplaces.items():
+    previous = previous_marketplace_info.get(marketplace)
+    if not previous:
+        continue
+    if any(previous.get(field) != info[field] for field in ('source', 'mode', 'source_type')):
+        replacement_marketplaces.add(marketplace)
+
+# A marketplace can keep its configured name while moving from a generated
+# adapter to an upstream Git source. Codex upgrades the existing source, so
+# explicitly replace only marketplaces whose managed source has changed.
+blocked_replacements = set()
+for marketplace in sorted(replacement_marketplaces):
+    print(f"  {BLUE}Replace Codex marketplace:{NC} {marketplace}")
+    previous_plugin_keys = sorted(
+        key for key, info in previous_plugin_info.items()
+        if info.get('marketplace') == marketplace
+    )
+    for key in previous_plugin_keys:
+        if key in installed_plugins:
+            if run(['codex', 'plugin', 'remove', key], label='Remove Codex plugin'):
+                installed_plugins.remove(key)
+            else:
+                ok = False
+                blocked_replacements.add(marketplace)
+                break
+    if marketplace in blocked_replacements:
+        continue
+    if marketplace in known_marketplaces:
+        if run(['codex', 'plugin', 'marketplace', 'remove', marketplace],
+               label='Remove Codex marketplace'):
+            known_marketplaces.pop(marketplace, None)
+        else:
+            ok = False
+            blocked_replacements.add(marketplace)
+
+for marketplace, info in desired_marketplaces.items():
+    if marketplace in blocked_replacements:
+        continue
     source = info['source']
     mode = info['mode']
     if marketplace in known_marketplaces:

@@ -70,11 +70,9 @@ repos:
     skills_path: "skills"
     prefix: "agent-"
     codex:
-      mode: adapter
+      mode: marketplace
       marketplace: agent-skills
       plugin: agent-skills
-      skills_path: "skills"
-      prefix: "agent-"
     description: >
       Addy Osmani 的 Agent Skills 合集，覆盖开发全生命周期：
       规划、实现、测试、代码审查、性能优化、安全加固、发布等 20 个 skills

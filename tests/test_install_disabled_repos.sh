@@ -97,11 +97,18 @@ printf '%s\n' "$*" >>"${FAKE_CODEX_LOG:?}"
 
 if [[ "${1:-}" == "plugin" && "${2:-}" == "marketplace" && "${3:-}" == "list" ]]; then
     printf 'MARKETPLACE             ROOT\n'
+    if [[ -n "${FAKE_CODEX_MARKETPLACES:-}" ]]; then
+        printf '%b\n' "$FAKE_CODEX_MARKETPLACES"
+    fi
     exit 0
 fi
 
 if [[ "${1:-}" == "plugin" && "${2:-}" == "list" ]]; then
-    printf '{"installed":[],"available":[]}\n'
+    if [[ -n "${FAKE_CODEX_PLUGINS:-}" ]]; then
+        printf '%s\n' "$FAKE_CODEX_PLUGINS"
+    else
+        printf '%s\n' '{"installed":[],"available":[]}'
+    fi
     exit 0
 fi
 
@@ -353,11 +360,82 @@ EOF
     assert_file_contains "$codex_log" "plugin add guige@guige-skills"
 }
 
+test_codex_marketplace_replaces_managed_adapter() {
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' RETURN
+
+    local project_dir="$tmp/project"
+    local skills_dir="$tmp/skills"
+    local fake_bin="$tmp/bin"
+    local codex_log="$tmp/codex.log"
+    local adapter_root="$project_dir/.codex-adapters/agent-skills"
+    mkdir -p "$project_dir" "$skills_dir" "$tmp/remotes/agent-skills"
+
+    make_fake_codex "$fake_bin"
+
+    cat >"$project_dir/skills.yaml" <<EOF
+clone_dir: .repos
+codex_adapter_dir: .codex-adapters
+plugin_state_file: .plugin_state.json
+skills_dir:
+  claude: $tmp/claude-skills
+  codex: $skills_dir
+repos:
+  agent-skills:
+    install_mode: plugin
+    url: $tmp/remotes/agent-skills
+    branch: main
+    marketplace: claude-marketplace
+    plugin: agent-skills
+    codex:
+      mode: marketplace
+      marketplace: agent-skills
+      plugin: agent-skills
+local: []
+EOF
+    cat >"$project_dir/.plugin_state.json" <<EOF
+{
+  "claude": {"marketplaces": {}, "plugins": {}},
+  "codex": {
+    "marketplaces": {
+      "agent-skills": {
+        "source": "$adapter_root",
+        "mode": "adapter",
+        "source_type": "local"
+      }
+    },
+    "plugins": {
+      "agent-skills@agent-skills": {
+        "marketplace": "agent-skills",
+        "plugin": "agent-skills",
+        "mode": "adapter"
+      }
+    }
+  }
+}
+EOF
+
+    cp "$ROOT_DIR/install.sh" "$project_dir/install.sh"
+    FAKE_CODEX_LOG="$codex_log" \
+        FAKE_CODEX_MARKETPLACES="agent-skills $adapter_root" \
+        FAKE_CODEX_PLUGINS='{"installed":[{"pluginId":"agent-skills@agent-skills"}],"available":[]}' \
+        PATH="$fake_bin:$PATH" \
+        bash "$project_dir/install.sh" --target codex --no-cleanup >"$project_dir/install.log"
+
+    assert_not_exists "$project_dir/.repos/agent-skills"
+    assert_file_contains "$codex_log" "plugin remove agent-skills@agent-skills"
+    assert_file_contains "$codex_log" "plugin marketplace remove agent-skills"
+    assert_file_contains "$codex_log" "plugin marketplace add $tmp/remotes/agent-skills --ref main"
+    assert_file_contains "$codex_log" "plugin add agent-skills@agent-skills"
+}
+
 test_disabled_repo_is_cloned_but_not_linked
 test_disabled_repo_updates_clone_but_removes_stale_link
 test_disabled_repo_installs_enabled_skills_only
 test_enabled_repo_installs_all_skills_even_with_filters
 test_codex_adapter_generates_marketplace_plugin
 test_codex_marketplace_installs_without_clone
+test_codex_marketplace_replaces_managed_adapter
 
 echo "installer tests passed"
